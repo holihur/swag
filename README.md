@@ -1024,6 +1024,44 @@ Relevant flags:
 | `--llmCacheFile` | Cache file used for incremental translation |
 | `--llmNoCache` | Disable the incremental translation cache |
 
+#### Switching languages in Swagger UI
+
+Each language is registered as its own instance (for example `swagger` and
+`swagger_zh_CN`). The [`swagger-ui`](swagger-ui) submodule is a fork that adds
+a **Select a language** dropdown to the Topbar and ships a Go package that
+embeds the built UI:
+
+```go
+import (
+	"net/http"
+
+	swaggerui "github.com/holihur/swagger-ui"
+	"github.com/swaggo/swag"
+)
+
+func main() {
+	handler := swaggerui.NewHandler(swaggerui.Config{
+		BasePath: "/swagger",
+		Languages: []swaggerui.Language{
+			{Name: "English", InstanceName: "swagger"},
+			{Name: "中文", InstanceName: "swagger_zh_CN"},
+			{Name: "日本語", InstanceName: "swagger_ja"},
+		},
+		PrimaryLanguage: "English",
+		SpecProvider: func(name string) ([]byte, error) {
+			doc, err := swag.ReadDoc(name)
+			return []byte(doc), err
+		},
+	})
+
+	http.Handle("/swagger/", handler)
+	http.ListenAndServe(":8080", nil)
+}
+```
+
+See the [submodule README](swagger-ui/README.md) for the JavaScript
+configuration (`languages`, `languages.primaryName`) and more details.
+
 ### How to use Generics
 
 ```go
