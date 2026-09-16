@@ -12,6 +12,7 @@ import (
 	"github.com/swaggo/swag"
 	"github.com/swaggo/swag/format"
 	"github.com/swaggo/swag/gen"
+	"github.com/swaggo/swag/llm"
 )
 
 const (
@@ -45,6 +46,17 @@ const (
 	stateFlag                = "state"
 	parseFuncBodyFlag        = "parseFuncBody"
 	parseGoPackagesFlag      = "parseGoPackages"
+	llmFlag                  = "llm"
+	llmBaseURLFlag           = "llmBaseURL"
+	llmAPIKeyFlag            = "llmAPIKey"
+	llmModelFlag             = "llmModel"
+	llmProtocolFlag          = "llmProtocol"
+	llmMaxTokensFlag         = "llmMaxTokens"
+	llmLanguagesFlag         = "llmLanguages"
+	llmTimeoutFlag           = "llmTimeout"
+	llmBatchSizeFlag         = "llmBatchSize"
+	llmCacheFileFlag         = "llmCacheFile"
+	llmNoCacheFlag           = "llmNoCache"
 )
 
 var initFlags = []cli.Flag{
@@ -196,6 +208,59 @@ var initFlags = []cli.Flag{
 		Name:  parseGoPackagesFlag,
 		Usage: "Parse Go sources by golang.org/x/tools/go/packages, disabled by default",
 	},
+	&cli.BoolFlag{
+		Name:  llmFlag,
+		Usage: "Generate multi-language OpenAPI documents using an LLM, disabled by default",
+	},
+	&cli.StringFlag{
+		Name:    llmBaseURLFlag,
+		EnvVars: []string{"OPENAI_BASE_URL"},
+		Value:   llm.DefaultBaseURL,
+		Usage:   "Base URL of the OpenAI compatible chat completions API",
+	},
+	&cli.StringFlag{
+		Name:    llmAPIKeyFlag,
+		EnvVars: []string{"OPENAI_API_KEY"},
+		Usage:   "API key used to authenticate against the LLM API",
+	},
+	&cli.StringFlag{
+		Name:    llmModelFlag,
+		EnvVars: []string{"OPENAI_MODEL"},
+		Value:   "gpt-4o-mini",
+		Usage:   "Model used to translate the OpenAPI document",
+	},
+	&cli.StringFlag{
+		Name:  llmProtocolFlag,
+		Usage: "Wire protocol of the LLM API: openai or anthropic (inferred from the base URL by default)",
+	},
+	&cli.IntFlag{
+		Name:  llmMaxTokensFlag,
+		Value: llm.DefaultMaxTokens,
+		Usage: "Maximum number of tokens generated per request (Anthropic style APIs)",
+	},
+	&cli.StringFlag{
+		Name:    llmLanguagesFlag,
+		Aliases: []string{"langs"},
+		Usage:   "Comma separated list of target languages, e.g. zh-CN,ja",
+	},
+	&cli.DurationFlag{
+		Name:  llmTimeoutFlag,
+		Value: llm.DefaultTimeout,
+		Usage: "Timeout for each LLM request",
+	},
+	&cli.IntFlag{
+		Name:  llmBatchSizeFlag,
+		Value: llm.DefaultBatchSize,
+		Usage: "Maximum number of strings translated per LLM request",
+	},
+	&cli.StringFlag{
+		Name:  llmCacheFileFlag,
+		Usage: "File used to persist translations between runs (enables incremental translation)",
+	},
+	&cli.BoolFlag{
+		Name:  llmNoCacheFlag,
+		Usage: "Disable incremental translation cache and translate every string on each run",
+	},
 }
 
 func initAction(ctx *cli.Context) error {
@@ -250,6 +315,32 @@ func initAction(ctx *cli.Context) error {
 			pdv = 1
 		}
 	}
+
+	var localization *gen.LocalizationConfig
+	if ctx.Bool(llmFlag) || strings.TrimSpace(ctx.String(llmLanguagesFlag)) != "" {
+		languages := splitAndTrim(ctx.String(llmLanguagesFlag))
+		if len(languages) == 0 {
+			return fmt.Errorf("at least one target language must be provided via --%s", llmLanguagesFlag)
+		}
+
+		localization = &gen.LocalizationConfig{
+			Languages: languages,
+			Client: llm.NewClient(llm.ClientConfig{
+				BaseURL:   ctx.String(llmBaseURLFlag),
+				APIKey:    ctx.String(llmAPIKeyFlag),
+				Model:     ctx.String(llmModelFlag),
+				Protocol:  ctx.String(llmProtocolFlag),
+				MaxTokens: ctx.Int(llmMaxTokensFlag),
+				Timeout:   ctx.Duration(llmTimeoutFlag),
+			}),
+			BatchSize: ctx.Int(llmBatchSizeFlag),
+			CacheFile: ctx.String(llmCacheFileFlag),
+		}
+		if ctx.Bool(llmNoCacheFlag) {
+			localization.Cache = llm.NewMemoryCache()
+		}
+	}
+
 	return gen.New().Build(&gen.Config{
 		SearchDir:           ctx.String(searchDirFlag),
 		Excludes:            ctx.String(excludeFlag),
@@ -280,7 +371,23 @@ func initAction(ctx *cli.Context) error {
 		State:               ctx.String(stateFlag),
 		ParseFuncBody:       ctx.Bool(parseFuncBodyFlag),
 		ParseGoPackages:     ctx.Bool(parseGoPackagesFlag),
+		Localization:        localization,
 	})
+}
+
+func splitAndTrim(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }
 
 func main() {

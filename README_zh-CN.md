@@ -736,6 +736,63 @@ type Resp struct {
 // @Security ApiKeyAuth && OAuth2Application[write, admin]
 ```
 
+### 使用 LLM 生成多语言 OpenAPI 文档
+
+`swag` 可以通过 LLM 为每种目标语言生成一份翻译后的 OpenAPI 文档。
+只有可读字段（`title`、`summary` 和 `description`）会被翻译，文档结构保持不变。
+
+该功能兼容 OpenAI 风格（`/chat/completions`）和 Anthropic 风格（`/v1/messages`）
+的 API。当 Base URL 中包含 `anthropic` 时会自动使用 Anthropic 协议，
+也可以通过 `--llmProtocol` 显式指定。
+
+```console
+swag init --llm \
+  --llmBaseURL https://api.openai.com/v1 \
+  --llmAPIKey "$OPENAI_API_KEY" \
+  --llmModel gpt-4o-mini \
+  --llmLanguages zh-CN,ja
+```
+
+生成的文件会与默认文件放在同一目录下，并在文件名中添加语言标记：
+
+```
+docs/
+├── docs.go
+├── swagger.json
+├── swagger.yaml
+├── docs.zh-CN.go
+├── swagger.zh-CN.json
+├── swagger.zh-CN.yaml
+├── docs.ja.go
+├── swagger.ja.json
+└── swagger.ja.yaml
+```
+
+每个翻译后的 `docs.go` 都会注册独立的实例，因此可以在同一个二进制中
+同时提供多种语言。
+
+#### 增量翻译
+
+翻译结果会缓存到 `docs/.swaggo-llm-cache.json`（可通过 `--llmCacheFile` 修改）。
+下一次运行时只有新增或修改过的文本会发送给 LLM，从而让重复生成变得快速且低成本。
+使用 `--llmNoCache` 可以关闭缓存，每次运行都重新翻译全部内容。
+
+相关参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `--llm` | 启用基于 LLM 的多语言文档生成 |
+| `--llmLanguages` (`--langs`) | 以逗号分隔的目标语言，例如 `zh-CN,ja` |
+| `--llmBaseURL` | API 基础地址（或使用 `OPENAI_BASE_URL`） |
+| `--llmAPIKey` | API 密钥（或使用 `OPENAI_API_KEY`） |
+| `--llmModel` | 模型名称（或使用 `OPENAI_MODEL`） |
+| `--llmProtocol` | `openai` 或 `anthropic`（默认自动推断） |
+| `--llmTimeout` | 每次请求的超时时间 |
+| `--llmBatchSize` | 每次请求翻译的最大字符串数量 |
+| `--llmMaxTokens` | 每次请求生成的最大 token 数 |
+| `--llmCacheFile` | 用于增量翻译的缓存文件 |
+| `--llmNoCache` | 关闭增量翻译缓存 |
+
 ## 项目相关
 
 This project was inspired by [yvasiyarov/swagger](https://github.com/yvasiyarov/swagger) but we simplified the usage and added support a variety of [web frameworks](#supported-web-frameworks). Gopher image source is [tenntenn/gopher-stickers](https://github.com/tenntenn/gopher-stickers). It has licenses [creative commons licensing](http://creativecommons.org/licenses/by/3.0/deed.en).

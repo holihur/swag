@@ -3,6 +3,7 @@ package gen
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"go/format"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/go-openapi/spec"
 	"github.com/swaggo/swag"
+	"github.com/swaggo/swag/llm"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 	"sigs.k8s.io/yaml"
@@ -62,6 +64,42 @@ func New() *Gen {
 	}
 
 	return &gen
+}
+
+// DefaultTranslationCacheFile is the default file used to persist LLM
+// translations between runs when no cache file is configured.
+const DefaultTranslationCacheFile = ".swaggo-llm-cache.json"
+
+// LocalizationConfig configures LLM based translation of the generated
+// OpenAPI document into one or more languages.
+type LocalizationConfig struct {
+	// Languages is the list of target language codes, for example
+	// []string{"zh-CN", "ja"}.
+	Languages []string
+
+	// Client is the chat client used to translate the document.
+	Client llm.ChatClient
+
+	// Cache optionally stores translations between runs to make generation
+	// incremental. When Cache is nil, a file cache is loaded from CacheFile.
+	Cache llm.Cache
+
+	// CacheFile is the JSON file used to persist translations. When empty,
+	// DefaultTranslationCacheFile inside the output directory is used.
+	CacheFile string
+
+	// BatchSize is the maximum number of strings translated per request.
+	BatchSize int
+
+	// MaxTextLength is the maximum number of characters translated per request.
+	MaxTextLength int
+
+	// SystemPrompt overrides the default translation prompt. It may contain a
+	// single %s verb which is replaced with the target language.
+	SystemPrompt string
+
+	// Glossary maps source terms to their preferred translation.
+	Glossary map[string]string
 }
 
 // Config presents Gen configurations.
@@ -155,6 +193,14 @@ type Config struct {
 
 	// ParseGoPackages whether swag use golang.org/x/tools/go/packages to parse source.
 	ParseGoPackages bool
+
+	// Localization enables LLM based generation of multi-language OpenAPI
+	// documents. When nil or empty only the default document is generated.
+	Localization *LocalizationConfig
+
+	// Language is the target language of the document currently being written.
+	// It is managed internally and should not be set by callers.
+	Language string
 }
 
 // Build builds swagger json file  for given searchDir and mainAPIFile. Returns json.
@@ -249,21 +295,130 @@ func (g *Gen) Build(config *Config) error {
 		}
 	}
 
+	if err := g.buildLocalized(config, swagger); err != nil {
+		return err
+	}
+
 	return nil
 }
 
-func (g *Gen) writeDocSwagger(config *Config, swagger *spec.Swagger) error {
-	var filename = "docs.go"
+// buildLocalized generates a translated copy of the swagger document for every
+// configured language. Translations are reused across runs through a cache so
+// only new or changed strings are sent to the LLM.
+func (g *Gen) buildLocalized(config *Config, swagger *spec.Swagger) error {
+	localization := config.Localization
+	if localization == nil || len(localization.Languages) == 0 {
+		return nil
+	}
+	if localization.Client == nil {
+		return fmt.Errorf("llm: a client is required to generate localized documents")
+	}
 
+	opts := llm.TranslateOptions{
+		BatchSize:     localization.BatchSize,
+		MaxTextLength: localization.MaxTextLength,
+		SystemPrompt:  localization.SystemPrompt,
+		Glossary:      localization.Glossary,
+		Cache:         localization.Cache,
+	}
+
+	if opts.Cache == nil {
+		cachePath := localization.CacheFile
+		if cachePath == "" {
+			cachePath = filepath.Join(config.OutputDir, DefaultTranslationCacheFile)
+		}
+
+		fileCache, err := llm.NewFileCache(cachePath)
+		if err != nil {
+			return err
+		}
+		opts.Cache = fileCache
+
+		defer func() {
+			if err := fileCache.Save(); err != nil {
+				g.debug.Printf("failed to save translation cache: %v", err)
+			}
+		}()
+	}
+
+	for _, language := range localization.Languages {
+		language = strings.TrimSpace(language)
+		if language == "" {
+			continue
+		}
+
+		g.debug.Printf("Generate %s swagger docs....", language)
+
+		localized, err := llm.TranslateSpec(context.Background(), localization.Client, swagger, language, opts)
+		if err != nil {
+			return err
+		}
+
+		localizedConfig := *config
+		localizedConfig.Language = language
+		localizedConfig.InstanceName = localizedInstanceName(config.InstanceName, language)
+
+		for _, outputType := range config.OutputTypes {
+			outputType = strings.ToLower(strings.TrimSpace(outputType))
+			if typeWriter, ok := g.outputTypeMap[outputType]; ok {
+				if err := typeWriter(&localizedConfig, localized); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// outputPath builds the output file path for the given base file name,
+// taking the configured state, instance name and language into account.
+func outputPath(config *Config, base string) string {
+	name := base
+	if config.Language != "" {
+		ext := path.Ext(name)
+		name = strings.TrimSuffix(name, ext) + "." + config.Language + ext
+	}
 	if config.State != "" {
-		filename = config.State + "_" + filename
+		name = config.State + "_" + name
 	}
-
-	if config.InstanceName != swag.Name {
-		filename = config.InstanceName + "_" + filename
+	if config.InstanceName != "" && config.InstanceName != swag.Name && config.Language == "" {
+		name = config.InstanceName + "_" + name
 	}
+	return path.Join(config.OutputDir, name)
+}
 
-	docFileName := path.Join(config.OutputDir, filename)
+// localizedInstanceName derives a unique instance name for a language so that
+// localized documents can be registered and served independently.
+func localizedInstanceName(base, language string) string {
+	if base == "" {
+		base = swag.Name
+	}
+	return base + "_" + normalizeLanguage(language)
+}
+
+// normalizeLanguage converts a language tag such as "zh-CN" into an
+// identifier friendly form such as "zh_CN".
+func normalizeLanguage(language string) string {
+	var builder strings.Builder
+	lastUnderscore := false
+	for _, r := range language {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			builder.WriteRune(r)
+			lastUnderscore = false
+		default:
+			if !lastUnderscore {
+				builder.WriteByte('_')
+				lastUnderscore = true
+			}
+		}
+	}
+	return strings.Trim(builder.String(), "_")
+}
+
+func (g *Gen) writeDocSwagger(config *Config, swagger *spec.Swagger) error {
+	docFileName := outputPath(config, "docs.go")
 
 	absOutputDir, err := filepath.Abs(config.OutputDir)
 	if err != nil {
@@ -296,17 +451,7 @@ func (g *Gen) writeDocSwagger(config *Config, swagger *spec.Swagger) error {
 }
 
 func (g *Gen) writeJSONSwagger(config *Config, swagger *spec.Swagger) error {
-	var filename = "swagger.json"
-
-	if config.State != "" {
-		filename = config.State + "_" + filename
-	}
-
-	if config.InstanceName != swag.Name {
-		filename = config.InstanceName + "_" + filename
-	}
-
-	jsonFileName := path.Join(config.OutputDir, filename)
+	jsonFileName := outputPath(config, "swagger.json")
 
 	b, err := g.jsonIndent(swagger)
 	if err != nil {
@@ -324,17 +469,7 @@ func (g *Gen) writeJSONSwagger(config *Config, swagger *spec.Swagger) error {
 }
 
 func (g *Gen) writeYAMLSwagger(config *Config, swagger *spec.Swagger) error {
-	var filename = "swagger.yaml"
-
-	if config.State != "" {
-		filename = config.State + "_" + filename
-	}
-
-	if config.InstanceName != swag.Name {
-		filename = config.InstanceName + "_" + filename
-	}
-
-	yamlFileName := path.Join(config.OutputDir, filename)
+	yamlFileName := outputPath(config, "swagger.yaml")
 
 	b, err := g.json(swagger)
 	if err != nil {

@@ -44,6 +44,7 @@ Swag converts Go annotations to Swagger Documentation 2.0. We've created a varie
 	- [How to use security annotations](#how-to-use-security-annotations)
 	- [Add a description for enum items](#add-a-description-for-enum-items)
 	- [Generate only specific docs file types](#generate-only-specific-docs-file-types)
+	- [Generate multi-language OpenAPI documents with an LLM](#generate-multi-language-openapi-documents-with-an-llm)
     - [How to use Go generic types](#how-to-use-generics)
 - [About the Project](#about-the-project)
 
@@ -962,6 +963,66 @@ By default `swag` command generates Swagger specification in three different fil
 - swagger.yaml
 
 If you would like to limit a set of file types which should be generated you can use `--outputTypes` (short `-ot`) flag. Default value is `go,json,yaml` - output types separated with comma. To limit output only to `go` and `yaml` files, you would write `go,yaml`. With complete command that would be `swag init --outputTypes go,yaml`.
+
+### Generate multi-language OpenAPI documents with an LLM
+
+`swag` can generate a translated copy of the OpenAPI document for every target
+language by using an LLM. Only human readable fields (`title`, `summary` and
+`description`) are translated; the structure of the document is preserved.
+
+The feature works with any OpenAI compatible (`/chat/completions`) or Anthropic
+compatible (`/v1/messages`) API. The protocol is inferred from the base URL when
+it contains `anthropic`, and can be forced with `--llmProtocol`.
+
+```console
+swag init --llm \
+  --llmBaseURL https://api.openai.com/v1 \
+  --llmAPIKey "$OPENAI_API_KEY" \
+  --llmModel gpt-4o-mini \
+  --llmLanguages zh-CN,ja
+```
+
+The generated files are written next to the default ones with the language in
+their name:
+
+```
+docs/
+├── docs.go
+├── swagger.json
+├── swagger.yaml
+├── docs.zh-CN.go
+├── swagger.zh-CN.json
+├── swagger.zh-CN.yaml
+├── docs.ja.go
+├── swagger.ja.json
+└── swagger.ja.yaml
+```
+
+Each translated `docs.go` registers its own instance, so several languages can
+be served from the same binary.
+
+#### Incremental translation
+
+Translations are cached in `docs/.swaggo-llm-cache.json` (configurable with
+`--llmCacheFile`). On the next run only new or changed strings are sent to the
+LLM, which makes repeated generation fast and cheap. Use `--llmNoCache` to
+disable the cache and translate everything on every run.
+
+Relevant flags:
+
+| Flag | Description |
+| --- | --- |
+| `--llm` | Enable LLM based multi-language generation |
+| `--llmLanguages` (`--langs`) | Comma separated target languages, e.g. `zh-CN,ja` |
+| `--llmBaseURL` | API base URL (or `OPENAI_BASE_URL`) |
+| `--llmAPIKey` | API key (or `OPENAI_API_KEY`) |
+| `--llmModel` | Model name (or `OPENAI_MODEL`) |
+| `--llmProtocol` | `openai` or `anthropic` (inferred by default) |
+| `--llmTimeout` | Timeout of each request |
+| `--llmBatchSize` | Maximum number of strings per request |
+| `--llmMaxTokens` | Maximum generated tokens per request |
+| `--llmCacheFile` | Cache file used for incremental translation |
+| `--llmNoCache` | Disable the incremental translation cache |
 
 ### How to use Generics
 
